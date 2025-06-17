@@ -1,0 +1,51 @@
+# Assemble with SPAdes
+spades.py -1 reads_1.fastq -2 reads_2.fastq -o spades_output --meta
+
+#  Compare with Velvet
+velveth velvet_output 31 -shortPaired -fastq -separate reads_1.fastq reads_2.fastq
+velvetg velvet_output
+
+# Quality Check
+quast.py spades_output/contigs.fasta -o quast_output
+
+# Align to reference
+bwa mem ref.fasta sample_R1.fastq sample_R2.fastq > sample.sam
+
+# Convert to BAM
+samtools view -Sb sample.sam > sample.bam
+samtools sort sample.bam -o sample_sorted.bam
+samtools index sample_sorted.bam
+
+# Variant Calling
+gatk HaplotypeCaller -R ref.fasta -I sample_sorted.bam -O sample.g.vcf
+
+# Filter and Convert
+gatk GenotypeGVCFs -R ref.fasta -V sample.g.vcf -O sample.vcf
+bcftools filter -O z -o sample_filtered.vcf.gz -s LOWQUAL -i '%QUAL>20' sample.vcf
+
+# Variant Annotation
+table_annovar.pl sample_filtered.vcf.gz humandb/ -buildver hg38 -out annotated -remove -protocol refGene,clinvar_20210501 -operation g,f -nastring . -vcfinput
+
+# Quality Control
+fastqc sample_R1.fastq sample_R2.fastq
+
+# Align to genome
+hisat2 -x genome_index -1 sample_R1.fastq -2 sample_R2.fastq -S aligned.sam
+samtools view -Sb aligned.sam | samtools sort -o aligned_sorted.bam
+samtools index aligned_sorted.bam
+
+# Quantify gene counts
+featureCounts -a annotation.gtf -o counts.txt aligned_sorted.bam
+
+library("DESeq2")
+
+# Read count matrix and metadata
+countData <- read.table("counts.txt", header=TRUE, row.names=1)
+colData <- data.frame(condition = c("control", "treated"))
+
+# DESeq2 pipeline
+dds <- DESeqDataSetFromMatrix(countData = countData, colData = colData, design = ~ condition)
+dds <- DESeq(dds)
+res <- results(dds)
+resOrdered <- res[order(res$pvalue), ]
+write.csv(as.data.frame(resOrdered), file="DEG_results.csv")
